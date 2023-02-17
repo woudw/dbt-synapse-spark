@@ -1,5 +1,7 @@
 from dbt.adapters.synapsespark.connections import SynapseSparkConnectionManager # noqa
 from dbt.adapters.synapsespark.connections import SynapseSparkCredentials
+from dbt.adapters.synapsespark.relation import SparkRelation  # noqa
+from dbt.adapters.synapsespark.column import SparkColumn  # noqa
 from dbt.adapters.synapsespark.impl import SynapseSparkAdapter
 
 from dbt.adapters.base import AdapterPlugin

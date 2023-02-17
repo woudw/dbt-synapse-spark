@@ -1,4 +1,5 @@
 import time
+from dbt.events import AdapterLogger
 from types import TracebackType
 from typing import Any, Dict
 from azure.identity import DefaultAzureCredential, AzureCliCredential
@@ -9,6 +10,7 @@ from azure.synapse.models import LivyStatementRequestBody, LivyStatementResponse
 from dbt.logger import GLOBAL_LOGGER as logger
 import dbt.exceptions
 
+logger = AdapterLogger("SynapseSpark")
 
 class LivyCursor:
     """
@@ -26,19 +28,23 @@ class LivyCursor:
         self.spark_session_operations = None
         self.workspace_name = None
         self.spark_pool_name = None
+        self.statement_id = -1
+        self.poll_interval = 1
 
     def __init__(self, session_id, 
                  spark_session_operations: SparkSessionOperations, 
-                 workspace_name, spark_pool_name) -> None:
+                 workspace_name, spark_pool_name, poll_interval) -> None:
         self._rows = None
         self._schema = None
         self.session_id = session_id
         self.spark_session_operations = spark_session_operations
         self.workspace_name = workspace_name
         self.spark_pool_name = spark_pool_name
+        self.statement_id = -1
+        self.poll_interval = poll_interval
 
     def __enter__(self):
-        print("LivyCursor - enter")
+        # print("LivyCursor - enter")
         return self
 
     def __exit__(
@@ -47,7 +53,7 @@ class LivyCursor:
         exc_val: Exception | None,
         exc_tb: TracebackType | None,
     ) -> bool:
-        print("LivyCursor - exit")
+        # print("LivyCursor - exit")
         self.close()
         return True
 
@@ -55,7 +61,7 @@ class LivyCursor:
     def description(
         self,
     ) -> list[tuple[str, str, None, None, None, None, bool]]:
-        print("LivyCursor - decription")
+        print("LivyCursor - description")
         """
         Get the description.
 
@@ -93,11 +99,10 @@ class LivyCursor:
         ------
         https://github.com/mkleehammer/pyodbc/wiki/Cursor#close
         """
-        print("LivyCursor - close")
+        logger.debug("LivyCursor - close")
         self._rows = None
         
     def _submitLivyCode(self, code) -> int:
-        print("LivyCursor - _getLivyResult")
         logger.debug(f"""Executing query: 
         {code}
         """)
@@ -109,17 +114,47 @@ class LivyCursor:
         return response.id
 
 
-    def _getLivyResult(self, statement_id: int):
-        print("LivyCursor - _getLivyResult")
-        while True:
-            result = self.spark_session_operations.get_statement(self.workspace_name, 
+    def _get_statement(self) -> LivyStatementResponseBody:
+        logger.debug("LivyCursor - _get_statement")
+        result = self.spark_session_operations.get_statement(self.workspace_name, 
                                                         self.spark_pool_name, 
                                                         self.session_id,
-                                                        statement_id)
-            if result.state == 'available':
+                                                        self.statement_id)
+        return result
+
+    def get_sql_state(self):
+        logger.debug("LivyCursor - get_sql_state()")
+        return self._get_statement().output.status
+
+
+    def _getLivyResult(self):
+        logger.debug("LivyCursor - _getLivyResult")
+        while True:
+            result = self._get_statement()
+            previous_state = 'unknown'
+            current_state = result.state
+            if current_state != previous_state:
+                logger.debug(f"Query status: {current_state}")
+            if current_state == 'available':
                 return result
-            print("Waiting for query results to become available")
-            time.sleep(2)
+            time.sleep(self.poll_interval)
+
+    def cancel(self):
+        logger.debug(f"Cancelling query: {self.statement_id}")
+        self.spark_session_operations.delete_statement(
+            self.workspace_name,
+            self.spark_pool_name,
+            self.session_id,
+            self.statement_id
+        )
+        while True:
+            result = self._get_statement()
+            previous_state = 'unknown'
+            current_state = result.state
+            if current_state != previous_state:
+                logger.debug(f"Query status: {current_state}")
+            if current_state in ('available', 'error', 'cancelled'):
+                return
 
 
     def execute(self, sql: str, *parameters: Any) -> None:
@@ -142,17 +177,21 @@ class LivyCursor:
         ------
         https://github.com/mkleehammer/pyodbc/wiki/Cursor#executesql-parameters
         """
-        print("LivyCursor - execute")
+        logger.debug("LivyCursor - execute")
+        logger.debug(sql)
         # if len(parameters) > 0:
         #     sql = sql % parameters
         
         # TODO: handle parameterised sql
 
-        res = self._getLivyResult(self._submitLivyCode(sql))
+        statement_id = self._submitLivyCode(sql)
+        self.statement_id = statement_id
+
+        res = self._getLivyResult()
         if (res.output.status == 'ok'):
             # values = res['output']['data']['application/json']
             values = res.output.data['application/json']
-            print(values)
+            # print(values)
             if (len(values) >= 1):
                 self._rows = values['data'] # values[0]['values']
                 self._schema = values['schema']['fields'] # values[0]['schema']
@@ -166,14 +205,14 @@ class LivyCursor:
             self._schema = None
 
             raise dbt.exceptions.raise_database_error(
-                        'Error while executing query: ' + res['output']['evalue']
+                        'Error while executing query: ' + res.output.evalue
                     ) 
 
     def fetchall(self):
         """
         Fetch all data.
 
-        Returns
+        Return
         -------
         out : list() | None
             The rows.
@@ -205,14 +244,15 @@ class LivyCursor:
 
         return row
 
+class SynapseStatement:
+    """The handle of the connection."""
 
-class LivySessionWrapper():
-    """Wrapper around a session to support calls as a handle."""
-    def __init__(self, livy_session_id: int, spark_session_operations: SparkSessionOperations, workspace_name, spark_pool_name):
-        print("Creating LivySessionWrapper")
-        self.livy_session_id = livy_session_id
-        self.spark_session_operations = spark_session_operations 
-        self._cursor = LivyCursor(livy_session_id, spark_session_operations, workspace_name, spark_pool_name)
+    def __init__(self, livy_session_id, spark_session_operations, 
+                 workspace_name, spark_pool_name, poll_interval):
+        self._cursor = LivyCursor(livy_session_id, spark_session_operations, 
+                                     workspace_name, spark_pool_name, 
+                                     poll_interval)
+
 
     def cursor(self):
         """
@@ -224,6 +264,9 @@ class LivySessionWrapper():
             The cursor.
         """
         return self._cursor
+    
+    def cancel(self) -> None:
+        self._cursor.cancel()
 
     def close(self) -> None:
         """
@@ -236,76 +279,108 @@ class LivySessionWrapper():
         logger.debug("Connection.close()")
         self._cursor.close()
 
-
-def connect(workspace_name: str, spark_pool_name: str, user: str, authentication: str, conf: Dict[str, str | int]) -> LivySessionWrapper:
-    print("Connecting")
-    if authentication == 'DefaultAzureCredential':
-        credential = DefaultAzureCredential()
-    elif authentication == 'AzureCliCredential':
-        credential = AzureCliCredential()
-    synapse_client = SynapseClient(credential)
-    spark_session_operations: SparkSessionOperations = synapse_client.spark_session
-
-    session_name = f'dbt-{user}'
-
-    session = get_existing_session(workspace_name, spark_pool_name, session_name, spark_session_operations)
-
-    if session is None:
-        print('Did not find an existing session')
-        session = create_new_session(workspace_name, spark_pool_name, spark_session_operations, session_name, conf)
-    else:
-        print(f'Found existing session (id: {session.livy_session_id})')
-    return session
-
-
-def create_new_session(workspace_name, spark_pool_name, spark_session_operations: SparkSessionOperations,
-                       session_name, conf):
-    print('Creating a new session')
-    livy_session_response: ExtendedLivySessionResponse = spark_session_operations.create(
-        workspace_name, spark_pool_name, 
-        ExtendedLivySessionRequest(
-            name=session_name, 
-            driver_cores=conf['driver_cores'],
-            driver_memory=conf['driver_memory'],
-            executor_cores=conf['executor_cores'],
-            executor_memory=conf['executor_memory'],
-            num_executors=conf['num_executors']
-        )
-    )
-    state = livy_session_response.state
-    session_id = livy_session_response.id
-    print(state)
-    while True:
-        livy_session_response = spark_session_operations.get(workspace_name, spark_pool_name, session_id)
-        state = livy_session_response.state
-        print(state)
-        time.sleep(2)
-        if state == 'idle':
-            break
-        if state == 'dead':
-            print('Session is dead')
-            return None
-    return LivySessionWrapper(session_id, spark_session_operations, workspace_name, spark_pool_name)
-
-
-def get_existing_session(workspace_name: str, spark_pool_name: str, session_name: str, spark_session_operations: SparkSessionOperations) -> LivySessionWrapper:
-    print(f'Searching for existing session with name {session_name}')
-    start = 0
-    size = 20
-    while True:
-        session_list: ExtendedLivyListSessionResponse = spark_session_operations.list(
-            workspace_name, spark_pool_name, from_parameter=start, size=size,
-            detailed=True)
-        for session in session_list.sessions:
-            print(f"{session.name} ({session.id}): {session.state}")
-            if session.name == session_name and session.state == 'idle':
-                # print(session.state)
-                return LivySessionWrapper(session.id, spark_session_operations, workspace_name, spark_pool_name)
-        start = start+size
-        if len(session_list.sessions) == 0:
-            return None
+class LivySessionWrapper():
+    """Wrapper around a session to support calls as a handle."""
+    def __init__(self, livy_session_id: int, spark_session_operations: SparkSessionOperations, workspace_name, spark_pool_name, poll_interval):
+        logger.debug("Creating LivySessionWrapper")
+        self.livy_session_id = livy_session_id
+        self.spark_session_operations = spark_session_operations 
+        self.workspace_name = workspace_name
+        self.spark_pool_name = spark_pool_name
+        self.poll_interval = poll_interval
         
-        # Todo als we er een vinden in starting phase, dan nemen we deze
+    def get_statement(self) -> SynapseStatement:
+        return SynapseStatement(self.livy_session_id, 
+            self.spark_session_operations, self.workspace_name, 
+            self.spark_pool_name, self.poll_interval)
 
-# def wait_for_idle(workspace_name: str, spark_pool_name: str, session_name: str, spark_session_operations: SparkSessionOperations)
+
+
+class LivySessionFactory():
+
+    def __init__(self, workspace_name: str, spark_pool_name: str, user: str, 
+                 authentication: str, conf: Dict[str, str | int],
+                 poll_interval: int):
+        self.workspace_name = workspace_name
+        self.spark_pool_name = spark_pool_name
+        self.session_name = f'dbt-{user}'
+        self.conf = conf
+        self.poll_interval = poll_interval
+        if authentication == 'DefaultAzureCredential':
+            credential = DefaultAzureCredential()
+        elif authentication == 'AzureCliCredential':
+            credential = AzureCliCredential()
+        synapse_client = SynapseClient(credential)
+        self.spark_session_operations: SparkSessionOperations = synapse_client.spark_session
+
+
+    SESSION: LivySessionWrapper = None
+
+    def connect(self) -> LivySessionWrapper:
+        if LivySessionFactory.SESSION is not None:
+            logger.debug("Can reuse session")
+            return LivySessionFactory.SESSION
+        session = self.get_existing_session()
+        if session is None:
+            logger.debug('Did not find an existing session')
+            session = self.create_new_session()
+        else:
+            logger.debug(f'Found existing session (id: {session.livy_session_id})')
+        LivySessionFactory.SESSION = session
+        return session
+
+
+    def create_new_session(self):
+        logger.debug('Creating a new session')
+        livy_session_response: ExtendedLivySessionResponse = self.spark_session_operations.create(
+            self.workspace_name, self.spark_pool_name, 
+            ExtendedLivySessionRequest(
+                name=self.session_name, 
+                driver_cores=self.conf['driver_cores'],
+                driver_memory=self.conf['driver_memory'],
+                executor_cores=self.conf['executor_cores'],
+                executor_memory=self.conf['executor_memory'],
+                num_executors=self.conf['num_executors']
+            )
+        )
+        session_id = livy_session_response.id
+        return self.wait_for_available(session_id)
+
+
+    def get_existing_session(self) -> LivySessionWrapper:
+        logger.debug(f'Searching for existing session with name {self.session_name}')
+        start = 0
+        size = 20
+        while True:
+            session_list: ExtendedLivyListSessionResponse = self.spark_session_operations.list(
+                self.workspace_name, self.spark_pool_name, from_parameter=start, size=size,
+                detailed=True)
+            for session in session_list.sessions:
+                if session.name == self.session_name:
+                    logger.debug(f"Found {session.name} ({session.id}): {session.state}")
+                    if session.state != 'dead':
+                        return self.wait_for_available(session.id)
+            if len(session_list.sessions) == 0:
+                return None
+            start = start+size
+
+
+    def wait_for_available(self, session_id: int):
+        previous_state = 'Unknown state'
+        state = previous_state
+        while True:
+            livy_session_response = self.spark_session_operations.get(
+                self.workspace_name, self.spark_pool_name, session_id)
+            state = livy_session_response.state
+            if state != previous_state:
+                logger.debug(f"Session state ({session_id}): {state}")
+                previous_state = state
+            time.sleep(self.poll_interval)
+            if state == 'idle':
+                break
+            if state == 'dead':
+                logger.debug(f'Session ({session_id}) is dead')
+                return None
+        return LivySessionWrapper(session_id, self.spark_session_operations, 
+            self.workspace_name, self.spark_pool_name, self.poll_interval)
 

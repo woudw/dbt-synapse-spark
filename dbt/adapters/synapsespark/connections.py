@@ -4,11 +4,16 @@ from typing import Dict, Optional
 import dbt.exceptions # noqa
 from dbt.adapters.base import Credentials
 
+from dbt.events import AdapterLogger
+
+from dbt.contracts.connection import AdapterResponse
 from dbt.adapters.sql import SQLConnectionManager
 
-from dbt.logger import GLOBAL_LOGGER as logger
+from dbt.adapters.synapsespark.synapse_spark import LivyCursor, LivySessionFactory, LivySessionWrapper
 
-from dbt.adapters.synapsespark import synapse_spark
+import time
+
+logger = AdapterLogger("SynapseSpark")
 
 @dataclass
 class SynapseSparkCredentials(Credentials):
@@ -18,6 +23,7 @@ class SynapseSparkCredentials(Credentials):
     user: str
     spark_pool: str
     cluster_configuration: Dict[str, str | int]
+    poll_interval: int
     
     @classmethod
     def __pre_deserialize__(cls, data):
@@ -84,9 +90,21 @@ class SynapseSparkConnectionManager(SQLConnectionManager):
         except Exception as exc:
             logger.debug("Error running SQL: {}".format(sql))
             logger.debug("Rolling back transaction.")
+            logger.debug(exc)
             raise dbt.exceptions.RuntimeException(str(exc))
 
+    # No transactions on Spark....
+    def add_begin_query(self, *args, **kwargs):
+        logger.debug("NotImplemented: add_begin_query")
 
+    def add_commit_query(self, *args, **kwargs):
+        logger.debug("NotImplemented: add_commit_query")
+
+    def commit(self, *args, **kwargs):
+        logger.debug("NotImplemented: commit")
+
+    def rollback(self, *args, **kwargs):
+        logger.debug("NotImplemented: rollback")
 
     @classmethod
     def open(cls, connection):
@@ -94,53 +112,58 @@ class SynapseSparkConnectionManager(SQLConnectionManager):
         Receives a connection object and a Credentials object
         and moves it to the "open" state.
         """
-        print("open connection")
+        start_time = time.process_time()
+        #do some stuff
         # ## Example ##
-        if connection.state == "open":
+        if connection.state == 'open':
             logger.debug("Connection is already open, skipping open.")
             return connection
 
         credentials = connection.credentials
 
         try:
-            handle = synapse_spark.connect(
+            handle = LivySessionFactory(
                 workspace_name=credentials.workspace,
                 authentication=credentials.authentication,
                 spark_pool_name=credentials.spark_pool,
                 user=credentials.user,
-                conf=credentials.cluster_configuration
-
-                # host=credentials.host,
-                # port=credentials.port,
-                # username=credentials.username,
-                # password=credentials.password,
-                # catalog=credentials.database
-            )
+                conf=credentials.cluster_configuration,
+                poll_interval=credentials.poll_interval
+            ).connect().get_statement()
             connection.state = "open"
             connection.handle = handle
+            SynapseSparkConnectionManager.main_connection = connection
         except Exception as exc:
-            print(f"Exception: {exc}")
+            # print(f"Exception: {exc}")
             logger.error(exc)
-        print(f"Connection: {connection}")
+        elapsed_time = time.process_time() - start_time
+        logger.debug(f"SynapseSparkConnectionManager - open(): {elapsed_time}")
         return connection
 
     @classmethod
-    def get_response(cls,cursor):
+    def get_response(cls,cursor: LivyCursor) -> AdapterResponse:
         """
         Gets a cursor object and returns adapter-specific information
         about the last executed command generally a AdapterResponse ojbect
         that has items such as code, rows_affected,etc. can also just be a string ex. "OK"
         if your cursor does not offer rich metadata.
         """
-        print("get_response()")
-        # ## Example ##
-        # return cursor.status_message
-        # pass
+        logger.debug("SynapseSparkConnectionManager - get_response()")
+        code = cursor.get_sql_state() or "OK"
+        status_message = f"{code}"
+        return AdapterResponse(
+            _message=status_message,
+            code=code,
+            rows_affected=0
+        )
 
     def cancel(self, connection):
         """
         Gets a connection object and attempts to cancel any ongoing queries.
         """
+        logger.debug("SynapseSparkConnectionManager - cancel()")
+        handle: LivySessionWrapper = connection.handle
+        handle.close()
         # ## Example ##
         # tid = connection.handle.transaction_id()
         # sql = "select cancel_transaction({})".format(tid)
@@ -148,4 +171,4 @@ class SynapseSparkConnectionManager(SQLConnectionManager):
         # _, cursor = self.add_query(sql, "master")
         # res = cursor.fetchone()
         # logger.debug("Canceled query "{}": {}".format(connection_name, res))
-        pass
+        # pass
