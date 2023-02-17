@@ -17,6 +17,9 @@ setup(
     packages=find_namespace_packages(include=["dbt", "dbt.*"]),
     include_package_data=True,
     install_requires=[
-        "dbt-core~=1.3.0.",
+        "dbt-core~=1.3.0",
+        "azure-identity==1.12.0",
+        "azure-synapse==0.1.1",
+        "azure-synapse-spark==0.7.0"
     ],
 )

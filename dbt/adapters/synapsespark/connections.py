@@ -1,30 +1,41 @@
 from contextlib import contextmanager
 from dataclasses import dataclass
+from typing import Dict, Optional
 import dbt.exceptions # noqa
 from dbt.adapters.base import Credentials
 
-from dbt.adapters.sql import SQLConnectionManager as connection_cls
+from dbt.adapters.sql import SQLConnectionManager
 
 from dbt.logger import GLOBAL_LOGGER as logger
 
+from dbt.adapters.synapsespark import synapse_spark
+
 @dataclass
 class SynapseSparkCredentials(Credentials):
-    """
-    Defines database specific credentials that get added to
-    profiles.yml to connect to new adapter
-    """
-
-    # Add credentials members here, like:
-    # host: str
-    # port: int
-    # username: str
-    # password: str
-
-    _ALIASES = {
-        "dbname":"database",
-        "pass":"password",
-        "user":"username"
-    }
+    workspace: str
+    database: Optional[str]
+    authentication: str
+    user: str
+    spark_pool: str
+    cluster_configuration: Dict[str, str | int]
+    
+    @classmethod
+    def __pre_deserialize__(cls, data):
+        data = super().__pre_deserialize__(data)
+        if "database" not in data:
+            data["database"] = None
+        return data
+    
+    def __post_init__(self):
+        # spark classifies database and schema as the same thing
+        if self.database is not None and self.database != self.schema:
+            raise dbt.exceptions.DbtRuntimeError(
+                f"    schema: {self.schema} \n"
+                f"    database: {self.database} \n"
+                f"On Spark, database must be omitted or have the same value as"
+                f" schema."
+            )
+        self.database = None
 
     @property
     def type(self):
@@ -43,9 +54,9 @@ class SynapseSparkCredentials(Credentials):
         """
         List of keys to display in the `dbt debug` output.
         """
-        return ("host","port","username","user")
+        return ("workspace","authentication","user")
 
-class SynapseSparkConnectionManager(connection_cls):
+class SynapseSparkConnectionManager(SQLConnectionManager):
     TYPE = "synapsespark"
 
 
@@ -68,7 +79,14 @@ class SynapseSparkConnectionManager(connection_cls):
         #     logger.debug("Rolling back transaction.")
         #     self.release(connection_name)
         #     raise dbt.exceptions.RuntimeException(str(exc))
-        pass
+        try:
+            yield
+        except Exception as exc:
+            logger.debug("Error running SQL: {}".format(sql))
+            logger.debug("Rolling back transaction.")
+            raise dbt.exceptions.RuntimeException(str(exc))
+
+
 
     @classmethod
     def open(cls, connection):
@@ -76,25 +94,35 @@ class SynapseSparkConnectionManager(connection_cls):
         Receives a connection object and a Credentials object
         and moves it to the "open" state.
         """
+        print("open connection")
         # ## Example ##
-        # if connection.state == "open":
-        #     logger.debug("Connection is already open, skipping open.")
-        #     return connection
+        if connection.state == "open":
+            logger.debug("Connection is already open, skipping open.")
+            return connection
 
-        # credentials = connection.credentials
+        credentials = connection.credentials
 
-        # try:
-        #     handle = myadapter_library.connect(
-        #         host=credentials.host,
-        #         port=credentials.port,
-        #         username=credentials.username,
-        #         password=credentials.password,
-        #         catalog=credentials.database
-        #     )
-        #     connection.state = "open"
-        #     connection.handle = handle
-        # return connection
-        pass
+        try:
+            handle = synapse_spark.connect(
+                workspace_name=credentials.workspace,
+                authentication=credentials.authentication,
+                spark_pool_name=credentials.spark_pool,
+                user=credentials.user,
+                conf=credentials.cluster_configuration
+
+                # host=credentials.host,
+                # port=credentials.port,
+                # username=credentials.username,
+                # password=credentials.password,
+                # catalog=credentials.database
+            )
+            connection.state = "open"
+            connection.handle = handle
+        except Exception as exc:
+            print(f"Exception: {exc}")
+            logger.error(exc)
+        print(f"Connection: {connection}")
+        return connection
 
     @classmethod
     def get_response(cls,cursor):
@@ -104,9 +132,10 @@ class SynapseSparkConnectionManager(connection_cls):
         that has items such as code, rows_affected,etc. can also just be a string ex. "OK"
         if your cursor does not offer rich metadata.
         """
+        print("get_response()")
         # ## Example ##
         # return cursor.status_message
-        pass
+        # pass
 
     def cancel(self, connection):
         """

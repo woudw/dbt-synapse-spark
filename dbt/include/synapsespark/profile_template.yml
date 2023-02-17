@@ -1,18 +1,14 @@
 fixed:
   type: synapsespark
 prompts:
-  host:
-    hint: "your host name"
-  port:
-    default: 5432
-    type: "int"
+  workspace:
+    hint: "The name of the Synapse workspace"
+  authentication:
+    hint: "Azure Authentication method"
+  schema:
+    hint: "default schema / database"
   user:
-    hint: "dev username"
-  password:
-    hint: "dev password"
-    hide_input: true
-  dbname:
-    hint: "default database"
+    hint: "Who are you?"
   threads:
     hint: "1 or more"
     type: "int"
