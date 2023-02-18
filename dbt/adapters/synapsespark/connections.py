@@ -111,6 +111,9 @@ class SynapseSparkConnectionManager(SQLConnectionManager):
         """
         Receives a connection object and a Credentials object
         and moves it to the "open" state.
+
+        An handle is this case is actually a statement. So a thread will create
+        a new statement on a Livy Session.
         """
         start_time = time.process_time()
         #do some stuff
@@ -132,7 +135,6 @@ class SynapseSparkConnectionManager(SQLConnectionManager):
             ).connect().get_statement()
             connection.state = "open"
             connection.handle = handle
-            SynapseSparkConnectionManager.main_connection = connection
         except Exception as exc:
             # print(f"Exception: {exc}")
             logger.error(exc)

@@ -5,7 +5,6 @@ from typing import Any, Dict
 from azure.identity import DefaultAzureCredential, AzureCliCredential
 from azure.synapse import SynapseClient
 from azure.synapse.operations import SparkSessionOperations
-from azure.synapse.spark.models import SparkSession
 from azure.synapse.models import LivyStatementRequestBody, LivyStatementResponseBody, ExtendedLivySessionRequest, ExtendedLivyListSessionResponse, ExtendedLivySessionResponse
 from dbt.logger import GLOBAL_LOGGER as logger
 import dbt.exceptions
@@ -44,7 +43,6 @@ class LivyCursor:
         self.poll_interval = poll_interval
 
     def __enter__(self):
-        # print("LivyCursor - enter")
         return self
 
     def __exit__(
@@ -53,7 +51,6 @@ class LivyCursor:
         exc_val: Exception | None,
         exc_tb: TracebackType | None,
     ) -> bool:
-        # print("LivyCursor - exit")
         self.close()
         return True
 
@@ -61,7 +58,6 @@ class LivyCursor:
     def description(
         self,
     ) -> list[tuple[str, str, None, None, None, None, bool]]:
-        print("LivyCursor - description")
         """
         Get the description.
 
@@ -191,12 +187,9 @@ class LivyCursor:
         if (res.output.status == 'ok'):
             # values = res['output']['data']['application/json']
             values = res.output.data['application/json']
-            # print(values)
             if (len(values) >= 1):
                 self._rows = values['data'] # values[0]['values']
                 self._schema = values['schema']['fields'] # values[0]['schema']
-                # print("rows", self._rows)
-                # print("schema", self._schema)
             else:
                 self._rows = []
                 self._schema = []
@@ -297,15 +290,21 @@ class LivySessionWrapper():
 
 
 class LivySessionFactory():
+    """Responsible for creating or reusing a session."""
 
     def __init__(self, workspace_name: str, spark_pool_name: str, user: str, 
                  authentication: str, conf: Dict[str, str | int],
                  poll_interval: int):
         self.workspace_name = workspace_name
         self.spark_pool_name = spark_pool_name
+        # This is the session name. It is used to searched for any existing
+        # session that may be available.
         self.session_name = f'dbt-{user}'
         self.conf = conf
         self.poll_interval = poll_interval
+        # This can be much nicer (dynamic loading?)
+        # Also: other authentication methods (ClientSecret, ManagedIdentity) 
+        # should be possible.
         if authentication == 'DefaultAzureCredential':
             credential = DefaultAzureCredential()
         elif authentication == 'AzureCliCredential':
@@ -314,9 +313,14 @@ class LivySessionFactory():
         self.spark_session_operations: SparkSessionOperations = synapse_client.spark_session
 
 
+    """
+    A static cache, so going to the Livy API searching for a session is not
+    necessary (this takes time and is annoying).
+    """
     SESSION: LivySessionWrapper = None
 
     def connect(self) -> LivySessionWrapper:
+        """Connect to Livy."""
         if LivySessionFactory.SESSION is not None:
             logger.debug("Can reuse session")
             return LivySessionFactory.SESSION
@@ -348,6 +352,7 @@ class LivySessionFactory():
 
 
     def get_existing_session(self) -> LivySessionWrapper:
+        """Search and returna session in the Livy Api."""
         logger.debug(f'Searching for existing session with name {self.session_name}')
         start = 0
         size = 20
@@ -357,8 +362,9 @@ class LivySessionFactory():
                 detailed=True)
             for session in session_list.sessions:
                 if session.name == self.session_name:
-                    logger.debug(f"Found {session.name} ({session.id}): {session.state}")
                     if session.state != 'dead':
+                        logger.debug(f"Found {session.name} ({session.id}): {session.state}")
+                        # Still wait for availability, it may be in starting phase.
                         return self.wait_for_available(session.id)
             if len(session_list.sessions) == 0:
                 return None
