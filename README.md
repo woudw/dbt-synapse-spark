@@ -4,7 +4,7 @@
 Most of the code it theirs (or dbt-spark). I only converted it to use the Azure Synapse Library.
 
 ## Warning:
-This is in an experimental phase. A lot of testing still has to be done.
+** This is in an experimental phase. A lot of testing still has to be done. **
 
 <p align="center">
   <img src="https://raw.githubusercontent.com/dbt-labs/dbt/ec7dee39f793aa4f7dd3dae37282cc87664813e4/etc/dbt-logo-full.svg" alt="dbt logo" width="500"/>
