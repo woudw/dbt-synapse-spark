@@ -1,4 +1,10 @@
-v<p align="center">
+# Thanks to:
+[dbt-spark-livy ](https://github.com/cloudera/dbt-spark-livy)
+
+Most of the code it theirs (or dbt-spark). I only converted it to use the Azure Synapse Library.
+
+
+<p align="center">
   <img src="https://raw.githubusercontent.com/dbt-labs/dbt/ec7dee39f793aa4f7dd3dae37282cc87664813e4/etc/dbt-logo-full.svg" alt="dbt logo" width="500"/>
 </p>
 
